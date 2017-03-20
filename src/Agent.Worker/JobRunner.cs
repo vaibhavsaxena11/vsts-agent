@@ -10,6 +10,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Net.Http;
+using Microsoft.VisualStudio.Services.Agent.Worker.Docker;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker
 {
@@ -166,6 +167,73 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                     .FirstOrDefault();
                 ArgUtil.NotNull(jobExtension, nameof(jobExtension));
 
+                string dockerImage = jobContext.Variables.Get("VSTS_DOCKER_IMAGE");
+                if (!string.IsNullOrEmpty(dockerImage))
+                {
+                    jobContext.Docker.ContainerName = $"VSTS_{jobContext.Variables.System_HostType.ToString()}_{message.RequestId}";
+
+                    var dockerInitContext = jobContext.CreateChild(Guid.NewGuid(), "Initialize Container");
+                    using (var register = jobContext.CancellationToken.Register(() => { dockerInitContext.CancelToken(); }))
+                    {
+                        try
+                        {
+                            dockerInitContext.Start();
+                            dockerInitContext.Section(StringUtil.Loc("StepStarting", "Initialize Container"));
+                            dockerInitContext.Output($"Run job in Docker use image: {dockerImage}");
+
+                            var dockerManger = HostContext.GetService<IDockerCommandManager>();
+                            int pullExitCode = await dockerManger.DockerPull(dockerInitContext, dockerImage);
+                            if (pullExitCode != 0)
+                            {
+                                throw new InvalidOperationException($"Docker pull fail with exit code {pullExitCode}");
+                            }
+
+                            var createdContainer = await dockerManger.DockerCreate(dockerInitContext, dockerImage);
+                            dockerInitContext.Docker.ContainerId = createdContainer.ContainerId;
+                            dockerInitContext.Docker.ContainerName = createdContainer.ContainerName;
+                            dockerInitContext.Docker.CurrentUserName = createdContainer.CurrentUserName;
+                            dockerInitContext.Docker.CurrentUserId = createdContainer.CurrentUserId;
+
+                            int startExitCode = await dockerManger.DockerStart(dockerInitContext, dockerInitContext.Docker.ContainerId);
+                            if (startExitCode != 0)
+                            {
+                                throw new InvalidOperationException($"Docker start fail with exit code {startExitCode}");
+                            }
+
+                            int execExitCode = await dockerManger.DockerExec(dockerInitContext, dockerInitContext.Docker.ContainerId, string.Empty, $"useradd -m -u {createdContainer.CurrentUserId} {createdContainer.CurrentUserName}_VSTSContainer");
+                            if (execExitCode != 0)
+                            {
+                                throw new InvalidOperationException($"Docker exec fail with exit code {execExitCode}");
+                            }
+
+                            dockerInitContext.Section(StringUtil.Loc("StepFinishing", "Initialize Container"));
+                            dockerInitContext.Complete();
+                        }
+                        catch (OperationCanceledException ex) when (jobContext.CancellationToken.IsCancellationRequested)
+                        {
+                            // Log the exception and cancel the Docker Initialization.
+                            Trace.Error($"Caught cancellation exception from Docker Initialization: {ex}");
+                            dockerInitContext.Error(ex);
+                            dockerInitContext.Result = TaskResult.Canceled;
+                            dockerInitContext.Section(StringUtil.Loc("StepFinishing", "Initialize Container"));
+                            dockerInitContext.Complete();
+
+                            return await CompleteJobAsync(jobServer, jobContext, message, TaskResult.Canceled);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Log the error and fail the Docker Initialization.
+                            Trace.Error($"Caught exception from Docker Initialization: {ex}");
+                            dockerInitContext.Error(ex);
+                            dockerInitContext.Result = TaskResult.Failed;
+                            dockerInitContext.Section(StringUtil.Loc("StepFinishing", "Initialize Container"));
+                            dockerInitContext.Complete();
+
+                            return await CompleteJobAsync(jobServer, jobContext, message, TaskResult.Failed);
+                        }
+                    }
+                }
+
                 List<IStep> preJobSteps = new List<IStep>();
                 List<IStep> jobSteps = new List<IStep>();
                 List<IStep> postJobSteps = new List<IStep>();
@@ -292,6 +360,18 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         {
             // Clean TEMP.
             _tempDirectoryManager?.CleanupTempDirectory(jobContext);
+
+            if (!string.IsNullOrEmpty(jobContext.Docker.ContainerId))
+            {
+                jobContext.Output($"Stop docker container: {jobContext.Docker.ContainerName}");
+
+                var dockerManger = HostContext.GetService<IDockerCommandManager>();
+                int stopExitCode = await dockerManger.DockerStop(jobContext, jobContext.Docker.ContainerId);
+                if (stopExitCode != 0)
+                {
+                    jobContext.Error($"Docker stop fail with exit code {stopExitCode}");
+                }
+            }
 
             jobContext.Section(StringUtil.Loc("StepFinishing", message.JobName));
             TaskResult result = jobContext.Complete(taskResult);
