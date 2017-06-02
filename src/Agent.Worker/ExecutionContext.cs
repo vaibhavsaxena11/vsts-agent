@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Linq;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker
 {
@@ -24,13 +25,14 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         PlanFeatures Features { get; }
         Variables Variables { get; }
         Variables TaskVariables { get; }
+        HashSet<string> OutputVariables { get; }
         List<IAsyncCommandContext> AsyncCommands { get; }
         List<string> PrependPath { get; }
 
         // Initialize
         void InitializeJob(JobRequestMessage message, CancellationToken token);
         void CancelToken();
-        IExecutionContext CreateChild(Guid recordId, string name, Variables taskVariables = null);
+        IExecutionContext CreateChild(Guid recordId, string name, string refName, Variables taskVariables = null);
 
         // logging
         bool WriteDebug { get; }
@@ -40,6 +42,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         // timeline record update methods
         void Start(string currentOperation = null);
         TaskResult Complete(TaskResult? result = null, string currentOperation = null);
+        void SetVariable(string name, string value, bool isSecret, bool isOutput);
         void SetTimeout(TimeSpan? timeout);
         void AddIssue(Issue issue);
         void Progress(int percentage, string currentOperation = null);
@@ -54,6 +57,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         private readonly Dictionary<Guid, TimelineRecord> _detailRecords = new Dictionary<Guid, TimelineRecord>();
         private readonly object _loggerLock = new object();
         private readonly List<IAsyncCommandContext> _asyncCommands = new List<IAsyncCommandContext>();
+        private readonly HashSet<string> _outputvariables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private IPagingLogger _logger;
         private ISecretMasker _secretMasker;
@@ -74,6 +78,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         public List<SecureFile> SecureFiles { get; private set; }
         public Variables Variables { get; private set; }
         public Variables TaskVariables { get; private set; }
+        public HashSet<string> OutputVariables => _outputvariables;
         public bool WriteDebug { get; private set; }
         public List<string> PrependPath { get; private set; }
 
@@ -124,7 +129,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             _cancellationTokenSource.Cancel();
         }
 
-        public IExecutionContext CreateChild(Guid recordId, string name, Variables taskVariables = null)
+        public IExecutionContext CreateChild(Guid recordId, string name, string refName, Variables taskVariables = null)
         {
             Trace.Entering();
 
@@ -141,7 +146,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             child.PrependPath = PrependPath;
 
             // the job timeline record is at order 1.
-            child.InitializeTimelineRecord(_mainTimelineId, recordId, _record.Id, ExecutionContextType.Task, name, _childExecutionContextCount + 2);
+            child.InitializeTimelineRecord(_mainTimelineId, recordId, _record.Id, ExecutionContextType.Task, name, refName, _childExecutionContextCount + 2);
 
             child._logger = HostContext.CreateService<IPagingLogger>();
             child._logger.Setup(_mainTimelineId, recordId);
@@ -164,6 +169,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             if (result != null)
             {
                 Result = result;
+            }
+
+            // warn on missing output variables
+            List<string> missingOutputVariables = OutputVariables.Where(v => !_record.Variables.Keys.Contains(v)).ToList();
+            if (missingOutputVariables.Count > 0)
+            {
+                this.Warning($"Missing output variables: {string.Join(", ", missingOutputVariables)}");
             }
 
             // report total delay caused by server throttling.
@@ -199,6 +211,26 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             _logger.End();
 
             return Result.Value;
+        }
+
+        public void SetVariable(string name, string value, bool isSecret, bool isOutput)
+        {
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+            if (isOutput || OutputVariables.Contains(name))
+            {
+                _record.Variables[name] = new VariableValue()
+                {
+                    Value = value,
+                    IsSecret = isSecret
+                };
+                _jobServerQueue.QueueTimelineRecordUpdate(_mainTimelineId, _record);
+
+                Variables.Set($"{_record.RefName}.{name}", value, secret: isSecret);
+            }
+            else
+            {
+                Variables.Set(name, value, secret: isSecret);
+            }
         }
 
         public void SetTimeout(TimeSpan? timeout)
@@ -306,7 +338,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
 
             // Features
             Features = ApiUtil.GetFeatures(message.Plan);
-
+            
             // Endpoints
             Endpoints = message.Environment.Endpoints;
             Endpoints.Add(message.Environment.SystemConnection);
@@ -348,6 +380,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 parentTimelineRecordId: null,
                 recordType: ExecutionContextType.Job,
                 name: message.JobName,
+                refName: message.JobRefName,
                 order: 1); // The job timeline record must be at order 1.
 
             // Logger (must be initialized before writing warnings).
@@ -402,12 +435,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             _jobServerQueue.QueueFileUpload(_mainTimelineId, _record.Id, type, name, filePath, deleteSource: false);
         }
 
-        private void InitializeTimelineRecord(Guid timelineId, Guid timelineRecordId, Guid? parentTimelineRecordId, string recordType, string name, int order)
+        private void InitializeTimelineRecord(Guid timelineId, Guid timelineRecordId, Guid? parentTimelineRecordId, string recordType, string name, string refName, int order)
         {
             _mainTimelineId = timelineId;
             _record.Id = timelineRecordId;
             _record.RecordType = recordType;
             _record.Name = name;
+            _record.RefName = refName;
             _record.Order = order;
             _record.PercentComplete = 0;
             _record.State = TimelineRecordState.Pending;

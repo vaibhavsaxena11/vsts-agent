@@ -55,7 +55,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             ArgUtil.NotNull(message, nameof(message));
 
             // create a new timeline record node for 'Initialize job'
-            IExecutionContext context = jobContext.CreateChild(Guid.NewGuid(), StringUtil.Loc("InitializeJob"));
+            IExecutionContext context = jobContext.CreateChild(Guid.NewGuid(), StringUtil.Loc("InitializeJob"), nameof(JobExtension));
 
             JobInitializeResult initResult = new JobInitializeResult();
             using (var register = jobContext.CancellationToken.Register(() => { context.CancelToken(); }))
@@ -110,7 +110,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
 
                         Trace.Verbose($"Adding agent init script step.");
                         prepareStep.Initialize(HostContext);
-                        prepareStep.ExecutionContext = jobContext.CreateChild(Guid.NewGuid(), prepareStep.DisplayName);
+                        prepareStep.ExecutionContext = jobContext.CreateChild(Guid.NewGuid(), prepareStep.DisplayName, nameof(ManagementScriptStep));
                         prepareStep.AccessToken = message.Environment.SystemConnection.Authorization.Parameters["AccessToken"];
                         initResult.PreJobSteps.Add(prepareStep);
                     }
@@ -171,7 +171,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
 #endif
                         ITaskRunner taskStep = step as ITaskRunner;
                         ArgUtil.NotNull(taskStep, step.DisplayName);
-                        taskStep.ExecutionContext = jobContext.CreateChild(Guid.NewGuid(), StringUtil.Loc("PreJob", taskStep.DisplayName), taskVariablesMapping[taskStep.TaskInstance.InstanceId]);
+                        taskStep.ExecutionContext = jobContext.CreateChild(Guid.NewGuid(), StringUtil.Loc("PreJob", taskStep.DisplayName), taskStep.TaskInstance.RefName, taskVariablesMapping[taskStep.TaskInstance.InstanceId]);
                     }
 
                     // Add pre-job step from Extension
@@ -187,7 +187,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                     {
                         ITaskRunner taskStep = step as ITaskRunner;
                         ArgUtil.NotNull(taskStep, step.DisplayName);
-                        taskStep.ExecutionContext = jobContext.CreateChild(taskStep.TaskInstance.InstanceId, taskStep.DisplayName, taskVariablesMapping[taskStep.TaskInstance.InstanceId]);
+                        taskStep.ExecutionContext = jobContext.CreateChild(taskStep.TaskInstance.InstanceId, taskStep.DisplayName, taskStep.TaskInstance.RefName, taskVariablesMapping[taskStep.TaskInstance.InstanceId]);
                     }
 
                     // Add post-job steps from Tasks
@@ -202,7 +202,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                     {
                         ITaskRunner taskStep = step as ITaskRunner;
                         ArgUtil.NotNull(taskStep, step.DisplayName);
-                        taskStep.ExecutionContext = jobContext.CreateChild(Guid.NewGuid(), StringUtil.Loc("PostJob", taskStep.DisplayName), taskVariablesMapping[taskStep.TaskInstance.InstanceId]);
+                        taskStep.ExecutionContext = jobContext.CreateChild(Guid.NewGuid(), StringUtil.Loc("PostJob", taskStep.DisplayName), taskStep.TaskInstance.RefName, taskVariablesMapping[taskStep.TaskInstance.InstanceId]);
                     }
 
                     // Add post-job step from Extension
@@ -226,7 +226,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
 
                         Trace.Verbose($"Adding agent cleanup script step.");
                         finallyStep.Initialize(HostContext);
-                        finallyStep.ExecutionContext = jobContext.CreateChild(Guid.NewGuid(), finallyStep.DisplayName);
+                        finallyStep.ExecutionContext = jobContext.CreateChild(Guid.NewGuid(), finallyStep.DisplayName, nameof(ManagementScriptStep));
                         finallyStep.AccessToken = message.Environment.SystemConnection.Authorization.Parameters["AccessToken"];
                         initResult.PostJobStep.Add(finallyStep);
                     }

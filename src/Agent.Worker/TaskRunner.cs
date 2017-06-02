@@ -140,6 +140,15 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             VarUtil.ExpandValues(HostContext, source: inputs, target: handlerData.Inputs);
             ExecutionContext.Variables.ExpandValues(target: handlerData.Inputs);
 
+            // Set output variables.
+            foreach (var outputVar in definition.Data?.OutputVariables ?? new OutputVariable[0])
+            {
+                if (outputVar != null && !string.IsNullOrEmpty(outputVar.Name))
+                {
+                    ExecutionContext.OutputVariables.Add(outputVar.Name);
+                }
+            }
+
             // Create the handler.
             IHandler handler = handlerFactory.Create(
                 ExecutionContext,
