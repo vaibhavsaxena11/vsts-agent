@@ -117,6 +117,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                     }
 #endif
 
+                    var containerProvider = HostContext.GetService<IContainerOperationProvider>();
+                    string dockerImage = jobContext.Variables.Get("VSTS_DOCKER_IMAGE");
+                    if (!string.IsNullOrEmpty(dockerImage))
+                    {
+                        initResult.PreJobSteps.Add(containerProvider.GetStartContainerStep());
+                    }
+
                     // build up 3 lists of steps, pre-job, job, post-job
                     Stack<IStep> postJobStepsBuilder = new Stack<IStep>();
                     Dictionary<Guid, Variables> taskVariablesMapping = new Dictionary<Guid, Variables>();
@@ -214,6 +221,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                         initResult.PostJobStep.Add(extensionPostJobStep);
                     }
 
+                    if (!string.IsNullOrEmpty(dockerImage))
+                    {
+                        initResult.PostJobStep.Add(containerProvider.GetStopContainerStep());
+                    }
 #if OS_WINDOWS
                     // Add script post steps.
                     // This is for internal testing and is not publicly supported. This will be removed from the agent at a later time.
